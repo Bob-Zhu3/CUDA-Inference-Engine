@@ -1,0 +1,35 @@
+# Build artifacts
+build/
+dist/
+node_modules/
+__pycache__/
+*.pyc
+*.pyd
+*.pyo
+
+# C++ build files
+*.exe
+*.obj
+*.o
+*.dll
+*.lib
+*.pdb
+*.ilk
+*.exp
+
+# Environment variables
+.env
+.venv
+venv/
+env/
+
+# IDE settings
+.vscode/
+.idea/
+
+# OS generated files
+.DS_Store
+Thumbs.db
+
+# Generated project aggregation file
+project_code.txt

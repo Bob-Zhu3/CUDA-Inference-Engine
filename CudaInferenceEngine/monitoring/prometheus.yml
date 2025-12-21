@@ -1,0 +1,7 @@
+global:
+  scrape_interval: 15s
+
+scrape_configs:
+  - job_name: 'cuda_inference_engine'
+    static_configs:
+      - targets: ['inference-engine:8000']

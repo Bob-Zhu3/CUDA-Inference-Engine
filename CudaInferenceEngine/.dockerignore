@@ -1,0 +1,11 @@
+build/
+__pycache__/
+.git/
+.vscode/
+*.pyc
+*.pyd
+*.so
+*.exe
+*.lib
+*.exp
+*.obj
