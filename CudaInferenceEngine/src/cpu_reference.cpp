@@ -38,12 +38,12 @@ void CpuInference::run_inference(const vector<float>& input,
 
     auto start = std::chrono::high_resolution_clock::now();
 
-    for (int t = 0; t < time_steps; ++t)
+    for (int t = 0; t < time_steps; t++)
     {
-        for (int i = 0; i < 4 * hidden_size; ++i)
+        for (int i = 0; i < 4 * hidden_size; i++)
         {
             float dot = 0.0f;
-            for (int j = 0; j < input_size; ++j)
+            for (int j = 0; j < input_size; j++)
             {
                 float w_val = weights[i + j * 4 * hidden_size];
                 float x_val = input[t * input_size + j];
@@ -52,7 +52,7 @@ void CpuInference::run_inference(const vector<float>& input,
             z[i] = dot + biases[i];
         }
 
-        for (int h = 0; h < hidden_size; ++h)
+        for (int h = 0; h < hidden_size; h++)
         {
             float f_t = sigmoid(z[h]);
             float i_t = sigmoid(z[h + hidden_size]);
