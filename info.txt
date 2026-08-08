@@ -1,3 +1,8 @@
 App: http://localhost:8080
+API docs: http://localhost:8000/docs
 Grafana: http://localhost:3000/login
 Prometheus: http://localhost:9090
+
+Validated benchmark: docker compose exec inference-engine python3 benchmark_script.py
+Nsight profiling: docker compose exec inference-engine bash profile.sh
+Native Windows profiling: cd CudaInferenceEngine; .\profile.ps1

@@ -1,5 +1,5 @@
-fastapi
-uvicorn
-pydantic
-requests
-prometheus-fastapi-instrumentator
+fastapi==0.115.6
+uvicorn==0.34.0
+pydantic==2.10.4
+numpy==1.26.4
+prometheus-fastapi-instrumentator==7.0.0

@@ -1,30 +1,29 @@
 #pragma once
-#include <vector>
-#include <cmath>
 
-using namespace std;
+#include <vector>
 
 class CpuInference
 {
 public:
     CpuInference(int input_dim, int hidden_dim, int seq_len);
-    ~CpuInference();
 
-    void run_inference(const vector<float>& input,
-                       const vector<float>& weights,
-                       const vector<float>& biases,
-                       vector<float>& output,
-                       float* execution_time_ms = nullptr);
+    void load_lstm_weights(const std::vector<float>& input_weights,
+                           const std::vector<float>& recurrent_weights,
+                           const std::vector<float>& biases);
+
+    void run_inference(const std::vector<float>& input,
+                       std::vector<float>& output,
+                       float* execution_time_ms = nullptr) const;
 
 private:
     int input_size;
     int hidden_size;
     int time_steps;
+    bool weights_loaded;
 
-    vector<float> hidden_state;
-    vector<float> cell_state;
+    std::vector<float> input_weights;
+    std::vector<float> recurrent_weights;
+    std::vector<float> biases;
 
-    float sigmoid(float x);
-    float tanh_custom(float x);
+    static float sigmoid(float x);
 };
-

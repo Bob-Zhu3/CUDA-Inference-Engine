@@ -22,6 +22,6 @@ env/
 .DS_Store
 Thumbs.db
 project_code.txt
-
-# Exclude Screenshots from repo (but keep locally)
 Screenshots/
+*.nsys-rep
+lstm_benchmark_report*.sqlite

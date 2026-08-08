@@ -1,120 +1,350 @@
-import sys
-import os
-import random
-from fastapi import FastAPI
-from pydantic import BaseModel
-import uvicorn
-from prometheus_fastapi_instrumentator import Instrumentator
+from __future__ import annotations
 
-current_dir = os.path.dirname(os.path.abspath(__file__))
-possible_paths = [
-    os.path.join(current_dir, "..", "build", "Release"),
-    os.path.join(current_dir, "..", "build")
+import os
+import statistics
+import sys
+import threading
+import time
+from dataclasses import dataclass
+
+import numpy as np
+from fastapi import FastAPI, HTTPException
+from prometheus_fastapi_instrumentator import Instrumentator
+from pydantic import BaseModel
+
+
+CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
+POSSIBLE_MODULE_PATHS = [
+    os.path.join(CURRENT_DIR, "..", "build", "Release"),
+    os.path.join(CURRENT_DIR, "..", "build"),
 ]
 
-for p in possible_paths:
-    if os.path.exists(p):
-        sys.path.append(p)
-        if os.name == 'nt':
+for module_path in POSSIBLE_MODULE_PATHS:
+    if os.path.exists(module_path):
+        sys.path.insert(0, module_path)
+        if os.name == "nt":
             try:
-                os.add_dll_directory(p)
-            except Exception:
+                os.add_dll_directory(module_path)
+            except (AttributeError, FileNotFoundError):
                 pass
 
-if os.name == 'nt':
-    cuda_path = r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.8\bin"
-    if os.path.exists(cuda_path):
+if os.name == "nt":
+    cuda_bin = r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.8\bin"
+    if os.path.exists(cuda_bin):
         try:
-            os.add_dll_directory(cuda_path)
-        except Exception:
+            os.add_dll_directory(cuda_bin)
+        except (AttributeError, FileNotFoundError):
             pass
 
 import cuda_lstm_ops
 
-app = FastAPI()
+
+app = FastAPI(
+    title="CUDA Sequence Inference Engine",
+    description=(
+        "Single-layer LSTM and last-query self-attention demonstration"
+    ),
+)
 Instrumentator().instrument(app).expose(app)
 
-input_size = 4
-hidden_size = 8
-seq_len = 5
 
-print("initializing cuda inference engine...")
-engine = cuda_lstm_ops.Inference(input_size, hidden_size, seq_len)
+DEMO_INPUT_SIZE = 4
+DEMO_HIDDEN_SIZE = 8
+DEMO_SEQ_LEN = 5
+DEMO_SEED = 7
 
-bench_input_size = 1024
-bench_hidden_size = 4096
-bench_seq_len = 50
+BENCH_INPUT_SIZE = 1024
+BENCH_HIDDEN_SIZE = 1024
+BENCH_SEQ_LEN = 50
+BENCH_SEED = 2025
+BENCH_GPU_ITERATIONS = 5
 
-print("initializing benchmark engines...")
-bench_engine = cuda_lstm_ops.Inference(bench_input_size, bench_hidden_size, bench_seq_len)
-bench_cpu_engine = cuda_lstm_ops.CpuInference(bench_input_size, bench_hidden_size, bench_seq_len)
 
-def random_list(size):
-    return [random.random() - 0.5 for _ in range(size)]
+def make_lstm_data(
+    input_size: int,
+    hidden_size: int,
+    seed: int,
+    weight_scale: float = 0.025,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    rng = np.random.default_rng(seed)
 
-print("generating random model weights...")
-weights = random_list(4 * hidden_size * input_size)
-biases = random_list(4 * hidden_size)
+    input_weights = rng.uniform(
+        -weight_scale,
+        weight_scale,
+        size=(input_size, 4 * hidden_size),
+    ).astype(np.float32)
+    recurrent_weights = rng.uniform(
+        -weight_scale,
+        weight_scale,
+        size=(hidden_size, 4 * hidden_size),
+    ).astype(np.float32)
+    biases = rng.uniform(
+        -0.4 * weight_scale,
+        0.4 * weight_scale,
+        size=(4 * hidden_size,),
+    ).astype(np.float32)
+    return input_weights, recurrent_weights, biases
 
-print("generating benchmark weights...")
-bench_weights = random_list(4 * bench_hidden_size * bench_input_size)
-bench_biases = random_list(4 * bench_hidden_size)
 
-wq = random_list(input_size * hidden_size)
-wk = random_list(input_size * hidden_size)
-wv = random_list(input_size * hidden_size)
+print("Initializing the interactive CUDA engine...")
+demo_engine = cuda_lstm_ops.Inference(
+    DEMO_INPUT_SIZE,
+    DEMO_HIDDEN_SIZE,
+    DEMO_SEQ_LEN,
+)
+
+demo_input_weights, demo_recurrent_weights, demo_biases = make_lstm_data(
+    DEMO_INPUT_SIZE,
+    DEMO_HIDDEN_SIZE,
+    DEMO_SEED,
+    weight_scale=0.35,
+)
+demo_engine.load_lstm_weights(
+    demo_input_weights,
+    demo_recurrent_weights,
+    demo_biases,
+)
+
+demo_rng = np.random.default_rng(DEMO_SEED + 1)
+demo_Wq = demo_rng.uniform(
+    -1.5,
+    1.5,
+    size=(DEMO_INPUT_SIZE, DEMO_HIDDEN_SIZE),
+).astype(np.float32)
+demo_Wk = demo_rng.uniform(
+    -1.5,
+    1.5,
+    size=(DEMO_INPUT_SIZE, DEMO_HIDDEN_SIZE),
+).astype(np.float32)
+demo_Wv = demo_rng.uniform(
+    -0.25,
+    0.25,
+    size=(DEMO_INPUT_SIZE, DEMO_HIDDEN_SIZE),
+).astype(np.float32)
+demo_engine.load_attention_weights(demo_Wq, demo_Wk, demo_Wv)
+
+# Warm up one-time CUDA library initialization without leaking recurrent state.
+demo_warmup_input = np.zeros(
+    (DEMO_SEQ_LEN, DEMO_INPUT_SIZE),
+    dtype=np.float32,
+)
+demo_engine.run_inference(demo_warmup_input)
+demo_engine.run_self_attention(demo_warmup_input)
+
 
 class InferenceRequest(BaseModel):
     input_data: list[float]
 
+
+@dataclass
+class BenchmarkState:
+    gpu: object
+    cpu: object
+    input_data: np.ndarray
+    warmed_up: bool = False
+
+
+benchmark_state: BenchmarkState | None = None
+demo_execution_lock = threading.Lock()
+benchmark_initialization_lock = threading.Lock()
+benchmark_execution_lock = threading.Lock()
+
+
+def get_benchmark_state() -> BenchmarkState:
+    global benchmark_state
+
+    if benchmark_state is not None:
+        return benchmark_state
+
+    with benchmark_initialization_lock:
+        if benchmark_state is not None:
+            return benchmark_state
+
+        print("Initializing benchmark engines and deterministic weights...")
+        input_weights, recurrent_weights, biases = make_lstm_data(
+            BENCH_INPUT_SIZE,
+            BENCH_HIDDEN_SIZE,
+            BENCH_SEED,
+        )
+        rng = np.random.default_rng(BENCH_SEED + 1)
+        input_data = rng.uniform(
+            -0.5,
+            0.5,
+            size=(BENCH_SEQ_LEN, BENCH_INPUT_SIZE),
+        ).astype(np.float32)
+
+        gpu = cuda_lstm_ops.Inference(
+            BENCH_INPUT_SIZE,
+            BENCH_HIDDEN_SIZE,
+            BENCH_SEQ_LEN,
+        )
+        cpu = cuda_lstm_ops.CpuInference(
+            BENCH_INPUT_SIZE,
+            BENCH_HIDDEN_SIZE,
+            BENCH_SEQ_LEN,
+        )
+        gpu.load_lstm_weights(input_weights, recurrent_weights, biases)
+        cpu.load_lstm_weights(input_weights, recurrent_weights, biases)
+
+        benchmark_state = BenchmarkState(
+            gpu=gpu,
+            cpu=cpu,
+            input_data=input_data,
+        )
+        return benchmark_state
+
+
+def validate_input(values: list[float]) -> np.ndarray:
+    expected = DEMO_SEQ_LEN * DEMO_INPUT_SIZE
+    if len(values) != expected:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Expected exactly {expected} input values",
+        )
+    return np.asarray(values, dtype=np.float32).reshape(
+        DEMO_SEQ_LEN,
+        DEMO_INPUT_SIZE,
+    )
+
+
+def timed_gpu_call(method, input_data: np.ndarray):
+    started = time.perf_counter()
+    output, compute_ms = method(input_data)
+    end_to_end_ms = (time.perf_counter() - started) * 1_000.0
+    return np.asarray(output), float(compute_ms), end_to_end_ms
+
+
 @app.get("/")
 def root():
-    return {"status": "online", "message": "cuda inference engine ready"}
+    return {
+        "status": "online",
+        "message": "CUDA sequence inference engine ready",
+        "device": demo_engine.device_name(),
+    }
+
+
+@app.get("/model")
+def model_info():
+    return {
+        "device": demo_engine.device_name(),
+        "lstm": {
+            "input_size": DEMO_INPUT_SIZE,
+            "hidden_size": DEMO_HIDDEN_SIZE,
+            "sequence_length": DEMO_SEQ_LEN,
+            "type": "single-layer LSTM",
+        },
+        "attention": {
+            "type": "single-head, last-query self-attention",
+            "returned_attention_weights": DEMO_SEQ_LEN,
+        },
+    }
+
 
 @app.post("/predict/lstm")
-def predict_lstm(req: InferenceRequest):
-    print("received lstm inference request")
-    expected_len = seq_len * input_size
-    if len(req.input_data) != expected_len:
-        print(f"error: expected {expected_len} floats, got {len(req.input_data)}")
-        return {"error": f"expected {expected_len} floats"}
-    
-    output, _ = engine.run_inference(req.input_data, weights, biases)
-    print("lstm inference complete")
-    return {"output": output}
+def predict_lstm(request: InferenceRequest):
+    input_data = validate_input(request.input_data)
+    with demo_execution_lock:
+        output, execution_time_ms = demo_engine.run_inference(input_data)
+    return {
+        "output": np.asarray(output).tolist(),
+        "execution_time_ms": float(execution_time_ms),
+    }
+
 
 @app.post("/predict/attention")
-def predict_attention(req: InferenceRequest):
-    print("received attention inference request")
-    expected_len = seq_len * input_size
-    if len(req.input_data) != expected_len:
-        print(f"error: expected {expected_len} floats, got {len(req.input_data)}")
-        return {"error": f"expected {expected_len} floats"}
-    
-    output = engine.run_self_attention(req.input_data, wq, wk, wv)
-    print("attention inference complete")
-    return {"output": output}
+def predict_attention(request: InferenceRequest):
+    input_data = validate_input(request.input_data)
+    with demo_execution_lock:
+        output, weights, execution_time_ms = demo_engine.run_self_attention(
+            input_data
+        )
+    return {
+        "output": np.asarray(output).tolist(),
+        "attention_weights": np.asarray(weights).tolist(),
+        "execution_time_ms": float(execution_time_ms),
+    }
+
 
 @app.post("/benchmark")
 def benchmark():
-    print("running benchmark...")
-    input_data = random_list(bench_seq_len * bench_input_size)
-    
-    _, gpu_time = bench_engine.run_inference(input_data, bench_weights, bench_biases)
-    _, gpu_time_fp16 = bench_engine.run_inference_fp16(input_data, bench_weights, bench_biases)
-    _, cpu_time = bench_cpu_engine.run_inference(input_data, bench_weights, bench_biases)
-    
-    speedup = cpu_time / gpu_time if gpu_time > 0 else 0.0
-    speedup_fp16 = cpu_time / gpu_time_fp16 if gpu_time_fp16 > 0 else 0.0
-    
-    return {
-        "gpu_time_ms": gpu_time,
-        "gpu_time_fp16_ms": gpu_time_fp16,
-        "cpu_time_ms": cpu_time,
-        "speedup": speedup,
-        "speedup_fp16": speedup_fp16
-    }
+    with benchmark_execution_lock:
+        state = get_benchmark_state()
+
+        if not state.warmed_up:
+            for _ in range(2):
+                state.gpu.run_inference(state.input_data)
+                state.gpu.run_inference_fp16(state.input_data)
+            state.warmed_up = True
+
+        cpu_output, cpu_time_ms = state.cpu.run_inference(state.input_data)
+        cpu_output = np.asarray(cpu_output)
+
+        fp32_results = [
+            timed_gpu_call(state.gpu.run_inference, state.input_data)
+            for _ in range(BENCH_GPU_ITERATIONS)
+        ]
+        fp16_results = [
+            timed_gpu_call(state.gpu.run_inference_fp16, state.input_data)
+            for _ in range(BENCH_GPU_ITERATIONS)
+        ]
+
+        fp32_output = fp32_results[-1][0]
+        fp16_output = fp16_results[-1][0]
+        fp32_error = float(np.max(np.abs(fp32_output - cpu_output)))
+        fp16_error = float(np.max(np.abs(fp16_output - cpu_output)))
+        verified = fp32_error <= 1e-4 and fp16_error <= 2e-2
+
+        if not verified:
+            raise HTTPException(
+                status_code=500,
+                detail={
+                    "message": "Benchmark output validation failed",
+                    "fp32_max_abs_error": fp32_error,
+                    "fp16_max_abs_error": fp16_error,
+                },
+            )
+
+        gpu_time_ms = statistics.median(
+            result[1] for result in fp32_results
+        )
+        gpu_time_fp16_ms = statistics.median(
+            result[1] for result in fp16_results
+        )
+        gpu_end_to_end_ms = statistics.median(
+            result[2] for result in fp32_results
+        )
+        gpu_end_to_end_fp16_ms = statistics.median(
+            result[2] for result in fp16_results
+        )
+
+        return {
+            "gpu_time_ms": gpu_time_ms,
+            "gpu_time_fp16_ms": gpu_time_fp16_ms,
+            "gpu_end_to_end_ms": gpu_end_to_end_ms,
+            "gpu_end_to_end_fp16_ms": gpu_end_to_end_fp16_ms,
+            "cpu_time_ms": float(cpu_time_ms),
+            "speedup": float(cpu_time_ms) / gpu_time_ms,
+            "speedup_fp16": float(cpu_time_ms) / gpu_time_fp16_ms,
+            "fp32_max_abs_error": fp32_error,
+            "fp16_max_abs_error": fp16_error,
+            "verified": verified,
+            "iterations": BENCH_GPU_ITERATIONS,
+            "device": state.gpu.device_name(),
+            "configuration": {
+                "input_size": BENCH_INPUT_SIZE,
+                "hidden_size": BENCH_HIDDEN_SIZE,
+                "sequence_length": BENCH_SEQ_LEN,
+                "parameter_count": (
+                    4
+                    * BENCH_HIDDEN_SIZE
+                    * (BENCH_INPUT_SIZE + BENCH_HIDDEN_SIZE)
+                    + 4 * BENCH_HIDDEN_SIZE
+                ),
+            },
+        }
+
 
 if __name__ == "__main__":
-    print("starting uvicorn server on port 8000")
+    import uvicorn
+
     uvicorn.run(app, host="0.0.0.0", port=8000)
