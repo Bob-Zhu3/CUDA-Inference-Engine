@@ -1,5 +1,9 @@
 # CUDA Sequence Inference Engine
 
+![CUDA inference dashboard showing LSTM hidden-state and attention output visualizations](docs/images/dashboard-preview.png)
+
+*Interface preview from an earlier version of the dashboard.*
+
 A compact C++/CUDA demonstration of two sequence-model operations:
 
 - A real single-layer LSTM with input and recurrent projections.
